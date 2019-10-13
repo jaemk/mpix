@@ -1,9 +1,16 @@
 use crate::error::Result;
 use crate::Context;
 use {
-    futures_util::{compat::Stream01CompatExt, TryStreamExt},
+    futures_util::{
+        TryStreamExt,
+        compat::{
+            Stream01CompatExt,
+            Future01CompatExt,
+        },
+    },
     hyper::{Body, Response, StatusCode},
 };
+use redis::PipelineCommands;
 
 lazy_static::lazy_static! {
     pub static ref LOG: slog::Logger = { crate::LOG.new(slog::o!("mod" => "handlers")) };
@@ -36,7 +43,15 @@ pub mod test {
 }
 
 pub async fn index(_ctx: Context) -> Result<Response<Body>> {
-    Ok(Response::new(Body::from("hello!")))
+    let client = redis::Client::open("redis://localhost").unwrap();
+    let conn = client.get_async_connection().compat().await?;
+    let mut pipe = redis::pipe();
+    pipe.incr("boop", 1).ignore()
+        .expire("boop", 5).ignore()
+        .get("boop");
+    let (conn, (count,)): (_, (i32,)) = pipe.query_async(conn).compat().await?;
+    let (_, cagain): (_, i32) = redis::cmd("GET").arg("boop").query_async(conn).compat().await?;
+    Ok(Response::new(Body::from(format!("hello! {:?}", cagain))))
 }
 
 pub async fn not_found(_ctx: Context) -> Result<Response<Body>> {

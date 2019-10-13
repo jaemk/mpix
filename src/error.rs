@@ -45,6 +45,7 @@ impl std::fmt::Display for Error {
             ParseBool(ref e) => write!(f, "ParseBool: {}", e),
             HeaderToStrError(ref e) => write!(f, "HeaderToStrError: {}", e),
             HeaderInvalidValue(ref e) => write!(f, "HeaderInvalidValue: {}", e),
+            Redis(ref e) => write!(f, "RedisError: {}", e),
         }
     }
 }
@@ -62,6 +63,7 @@ impl std::error::Error for Error {
             ParseAddr(ref e) => e,
             ParseInt(ref e) => e,
             ParseBool(ref e) => e,
+            Redis(ref e) => e,
             _ => return None,
         })
     }
@@ -84,6 +86,7 @@ pub enum ErrorKind {
     ParseBool(std::str::ParseBoolError),
     HeaderToStrError(http::header::ToStrError),
     HeaderInvalidValue(http::header::InvalidHeaderValue),
+    Redis(redis::RedisError),
 }
 
 impl From<ErrorKind> for Error {
@@ -160,6 +163,14 @@ impl From<http::header::InvalidHeaderValue> for Error {
     fn from(e: http::header::InvalidHeaderValue) -> Error {
         Error {
             kind: Box::new(ErrorKind::HeaderInvalidValue(e)),
+        }
+    }
+}
+
+impl From<redis::RedisError> for Error {
+    fn from(e: redis::RedisError) -> Error {
+        Error {
+            kind: Box::new(ErrorKind::Redis(e)),
         }
     }
 }

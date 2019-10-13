@@ -14,6 +14,8 @@ fn main() {
     let port = 4000;
     let addr = SocketAddr::from((host, port));
 
+    // `svr` is a `std::future` which we need to box and wrap to
+    // make it compatible with hyper's futures01 runtime
     let svr = service::run(addr);
     let compat_svr = svr.unit_error().boxed().compat();
 

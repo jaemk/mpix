@@ -21,7 +21,8 @@ lazy_static::lazy_static! {
     pub static ref LOG: slog::Logger = { crate::LOG.new(slog::o!("mod" => "service")) };
 }
 
-async fn extract_auth(req: Request<Body>) -> Result<(Request<Body>, Option<Response<Body>>)> {
+/// Require an auth bearer token on requests
+async fn ensure_auth(req: Request<Body>) -> Result<(Request<Body>, Option<Response<Body>>)> {
     if let Some(auth) = req.headers().get("authorization") {
         if auth == "Bearer 123" {
             return Ok((req, None));
@@ -33,22 +34,26 @@ async fn extract_auth(req: Request<Body>) -> Result<(Request<Body>, Option<Respo
     Ok((req, Some(resp)))
 }
 
+/// gzip response content if the request accepts gzip
 async fn gzip_response(headers: HeaderMap, mut resp: Response<Body>) -> Result<Response<Body>> {
     if let Some(accept) = headers.get("accept-encoding") {
         if accept.to_str()?.contains("gzip") {
             resp.headers_mut()
                 .insert("content-encoding", HeaderValue::from_str("gzip")?);
+
+            // split so we can modify the body
             let (parts, bod) = resp.into_parts();
 
             let mut e = GzEncoder::new(Vec::new(), Compression::default());
+            // `bod` is a futures01 stream that needs to be made std::future compatible
             let bytes = bod.compat().try_concat().await?;
-            let ch = bytes.as_ref();
-            e.write_all(ch)
+            e.write_all(bytes.as_ref())
                 .map_err(|e| format!("error writing bytes to gzip encoder {:?}", e))?;
             let res = e
                 .finish()
                 .map_err(|e| format!("error finishing gzip {:?}", e))?;
             let new_bod = Body::from(res);
+
             let resp = Response::from_parts(parts, new_bod);
             return Ok(resp);
         }
@@ -59,20 +64,19 @@ async fn gzip_response(headers: HeaderMap, mut resp: Response<Body>) -> Result<R
 async fn route(req: Request<Body>, method: Method, uri: String) -> Result<Response<Body>> {
     router!(
          req, method, uri.trim_end_matches("/"),
-         [Method::GET, r"^$", {}] -> handlers::hello,
-         [Method::POST, r"^/echo/upper$", {}] -> handlers::echo_upper,
-         [Method::POST, r"^/echo/reverse$", {}] -> handlers::echo_reverse,
-         [Method::GET, r"^/greet/(?P<name>[\w]+)$", {"named"}] -> handlers::greet,
-         [Method::GET, r"^/greet$", {}] -> handlers::greet,
+         [Method::GET, r"^$", {}] -> handlers::index,
+         [Method::POST, r"^/test/echo/upper$", {}] -> handlers::test::echo_upper,
+         [Method::POST, r"^/test/echo/reverse$", {}] -> handlers::test::echo_reverse,
          _ -> handlers::not_found,
     );
 }
 
-async fn pipe(req: Request<Body>) -> Result<Response<Body>> {
+/// Pipe an incoming request through pre-processing, routing, and post-processing hooks
+async fn process(req: Request<Body>) -> Result<Response<Body>> {
     let headers = req.headers().clone();
 
     // before
-    let (req, resp) = extract_auth(req).await?;
+    let (req, resp) = ensure_auth(req).await?;
     if let Some(resp) = resp {
         return Ok(resp);
     }
@@ -88,11 +92,13 @@ async fn pipe(req: Request<Body>) -> Result<Response<Body>> {
 }
 
 async fn serve(req: Request<Body>) -> Result<Response<Body>> {
+    // capture incoming info for logs
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let start = std::time::Instant::now();
     let method = req.method().clone();
     let uri = req.uri().clone();
-    let response = match pipe(req).await {
+
+    let response = match process(req).await {
         Ok(resp) => resp,
         Err(err) => {
             slog::error!(LOG, "handler error";
@@ -102,6 +108,7 @@ async fn serve(req: Request<Body>) -> Result<Response<Body>> {
                 .body("server error".into())?
         }
     };
+
     let status = response.status();
     let elap = start.elapsed();
     let elap_ms = (elap.as_secs_f32() * 1_000.) + (elap.subsec_nanos() as f32 / 1_000_000.);
@@ -114,14 +121,22 @@ async fn serve(req: Request<Body>) -> Result<Response<Body>> {
     Ok(response)
 }
 
+/// Build a server future that can be passed to a runtime
 pub async fn run(addr: SocketAddr) {
-    slog::info!(LOG, "Listening";
-                "host" => format!("http://{}", addr));
+    slog::info!(LOG, "Listening"; "host" => format!("http://{}", addr));
 
-    let server_future = Server::bind(&addr).serve(|| service_fn(|req| serve(req).boxed().compat()));
+    let server_future = Server::bind(&addr).serve(|| {
+        service_fn(|req| {
+            // `serve` returns a `std::future` so we need to box and
+            // wrap it to make it futures01 compatible before handing
+            // it over to hyper
+            serve(req).boxed().compat()
+        })
+    });
 
+    // and now `server_future` is a futures01 future that we need to
+    // make `std::futures` compatible so we can `.await` it
     if let Err(e) = server_future.compat().await {
-        slog::error!(LOG, "server error";
-                     "error" => format!("{}", e));
+        slog::error!(LOG, "server error"; "error" => format!("{}", e));
     }
 }

@@ -10,28 +10,57 @@ use {
         service::service_fn,
         Body, Method, Request, Response, Server, StatusCode,
     },
-    std::{io::Write, net::SocketAddr},
+    std::{collections::HashSet, io::Write, net::SocketAddr},
 };
 
-use crate::error::Result;
-use crate::handlers;
+use crate::configuration::CONFIG;
+use crate::error::{Error, ErrorKind, Result};
 use crate::router;
+use crate::{handlers, Auth};
 
 lazy_static::lazy_static! {
     pub static ref LOG: slog::Logger = { crate::LOG.new(slog::o!("mod" => "service")) };
 }
 
+async fn is_valid_auth(auth_token: String) -> Result<Auth> {
+    if auth_token == CONFIG.auth_token {
+        Ok(Auth {
+            user_token: auth_token,
+        })
+    } else {
+        Err(ErrorKind::InvalidAuth("missing auth token".into()))?
+    }
+}
+
 /// Require an auth bearer token on requests
-async fn ensure_auth(req: Request<Body>) -> Result<(Request<Body>, Option<Response<Body>>)> {
-    if let Some(auth) = req.headers().get("authorization") {
-        if auth == "Bearer 123" {
-            return Ok((req, None));
+async fn ensure_auth(
+    req: Request<Body>,
+) -> Result<(Request<Body>, Option<Auth>, Option<Response<Body>>)> {
+    lazy_static::lazy_static! {
+        static ref ALLOWED: HashSet<&'static str> = maplit::hashset!{""};
+    };
+
+    let path = req.uri().path().trim_end_matches("/");
+    if ALLOWED.contains(path) || path.starts_with("/p/") {
+        return Ok((req, None, None));
+    }
+
+    let maybe_auth = req
+        .headers()
+        .get("x-mpix-auth")
+        .ok_or_else(|| Error::from("missing auth header"))
+        .and_then(|hv| Ok(hv.to_str()?.to_string()))
+        .ok();
+    if let Some(auth_token) = maybe_auth {
+        if let Some(auth) = is_valid_auth(auth_token).await.ok() {
+            return Ok((req, Some(auth), None));
         }
     }
+
     let resp = Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .body(Body::from("unauthorized"))?;
-    Ok((req, Some(resp)))
+    Ok((req, None, Some(resp)))
 }
 
 /// gzip response content if the request accepts gzip
@@ -47,26 +76,37 @@ async fn gzip_response(headers: HeaderMap, mut resp: Response<Body>) -> Result<R
             let mut e = GzEncoder::new(Vec::new(), Compression::default());
             // `bod` is a futures01 stream that needs to be made std::future compatible
             let bytes = bod.compat().try_concat().await?;
+            let bytes_size = bytes.len();
             e.write_all(bytes.as_ref())
                 .map_err(|e| format!("error writing bytes to gzip encoder {:?}", e))?;
             let res = e
                 .finish()
                 .map_err(|e| format!("error finishing gzip {:?}", e))?;
+            let res_size = res.len();
             let new_bod = Body::from(res);
 
             let resp = Response::from_parts(parts, new_bod);
+            slog::debug!(
+                LOG, "gzipped";
+                "original_size" => bytes_size, "gzipped_size" => res_size
+            );
             return Ok(resp);
         }
     }
     Ok(resp)
 }
 
-async fn route(req: Request<Body>, method: Method, uri: String) -> Result<Response<Body>> {
+async fn route(
+    req: Request<Body>,
+    auth: Option<Auth>,
+    method: Method,
+    uri: String,
+) -> Result<Response<Body>> {
     router!(
-         req, method, uri.trim_end_matches("/"),
+         req, auth, method, uri.trim_end_matches("/"),
          [Method::GET, r"^$", {}] -> handlers::index,
-         [Method::POST, r"^/test/echo/upper$", {}] -> handlers::test::echo_upper,
-         [Method::POST, r"^/test/echo/reverse$", {}] -> handlers::test::echo_reverse,
+         [Method::POST, r"^/create$", {}] -> handlers::create,
+         [Method::GET, r"^/p/(?P<token>[a-zA-Z0-9-_]+)$", {"token"}] -> handlers::track,
          _ -> handlers::not_found,
     );
 }
@@ -76,7 +116,7 @@ async fn process(req: Request<Body>) -> Result<Response<Body>> {
     let headers = req.headers().clone();
 
     // before
-    let (req, resp) = ensure_auth(req).await?;
+    let (req, auth, resp) = ensure_auth(req).await?;
     if let Some(resp) = resp {
         return Ok(resp);
     }
@@ -84,7 +124,7 @@ async fn process(req: Request<Body>) -> Result<Response<Body>> {
     // route
     let method = req.method().clone();
     let uri = req.uri().path().to_string();
-    let resp = route(req, method, uri).await?;
+    let resp = route(req, auth, method, uri).await?;
 
     // after
     let resp = gzip_response(headers, resp).await?;

@@ -1,10 +1,11 @@
+pub mod configuration;
 pub mod error;
 pub mod handlers;
 pub mod macros;
 pub mod service;
 
 use {
-    error::{ErrorKind, Result},
+    error::{Error, ErrorKind, Result},
     hyper::{Body, Request},
     lazy_static::lazy_static,
     slog::Logger,
@@ -63,7 +64,55 @@ impl Caps {
     }
 }
 
+pub struct Auth {
+    pub user_token: String,
+}
+
 pub struct Context {
     request: Request<Body>,
     captures: Caps,
+    auth: Option<Auth>,
+    redis: redis::Client,
+}
+impl Context {
+    fn redis() -> Result<redis::Client> {
+        Ok(redis::Client::open(
+            configuration::CONFIG.redis_url.as_ref(),
+        )?)
+    }
+
+    pub fn with_req(r: Request<Body>) -> Result<Self> {
+        Ok(Self {
+            request: r,
+            auth: None,
+            captures: Caps::empty(),
+            redis: Self::redis()?,
+        })
+    }
+
+    pub fn new(r: Request<Body>, auth: Option<Auth>, caps: Caps) -> Result<Self> {
+        Ok(Self {
+            request: r,
+            auth,
+            captures: caps,
+            redis: Self::redis()?,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Environment {
+    Local,
+    Production,
+}
+impl std::str::FromStr for Environment {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s.trim().to_lowercase().as_ref() {
+            "local" => Environment::Local,
+            "production" => Environment::Production,
+            s => Err(format!("Invalid env: {}", s))?,
+        })
+    }
 }

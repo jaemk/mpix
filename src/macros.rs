@@ -6,7 +6,7 @@ lazy_static::lazy_static! {
 macro_rules! router {
     (
         // incoming request info
-        $request:expr, $method:expr, $uri:expr,
+        $request:expr, $auth:expr, $method:expr, $uri:expr,
 
         // a set of cases to match the incoming request info
         // note: the last statement must be a catch all, `_ -> func`
@@ -40,7 +40,7 @@ macro_rules! router {
                         // captures start at index 1, or `None`
                         // if the regex wasn't a match
                         #[allow(unused_mut)]
-                        let ctx = if caps.len() > 1 {
+                        let url_captures = if caps.len() > 1 {
                             let mut map = std::collections::HashMap::new();
                             $(
                                let capture = caps
@@ -57,25 +57,17 @@ macro_rules! router {
                                    .to_string();
                                map.insert($match_capture_name.to_string(), capture);
                             )*
-                            crate::Context {
-                                request: $request,
-                                captures: crate::Caps::with(map),
-                            }
+                            crate::Caps::with(map)
                         } else {
-                            crate::Context {
-                                request: $request,
-                                captures: crate::Caps::empty(),
-                            }
+                            crate::Caps::empty()
                         };
+                        let ctx = crate::Context::new($request, $auth, url_captures)?;
                         return Ok($match_func(ctx).await?);
                     }
                 }
             }
         )*
-        let ctx = crate::Context {
-            request: $request,
-            captures: crate::Caps::empty(),
-        };
+        let ctx = crate::Context::with_req($request)?;
         return Ok($no_match_func(ctx).await?);
     };
 }

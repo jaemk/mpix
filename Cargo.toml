@@ -1,8 +1,12 @@
 [package]
 name = "mpix"
-version = "0.1.0"
+version = "0.0.0"
 authors = ["James Kominick <james@kominick.com>"]
 edition = "2018"
+
+[[bin]]
+name = "mpix"
+path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

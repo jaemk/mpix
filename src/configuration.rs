@@ -13,12 +13,15 @@ pub struct Config {
 }
 impl Config {
     pub fn load() -> Self {
+        let redis_host = env::var("REDIS_HOST").expect("missing var: redis_host");
+        let redis_pass= env::var("REDIS_PASSWORD").expect("missing var: redis_password");
+        let redis_url = format!("redis://:{}@{}", redis_pass, redis_host);
         Self {
             env: env::var("ENV")
                 .expect("missing var: env")
                 .parse::<Environment>()
                 .expect("invalid env"),
-            redis_url: env::var("REDIS_URL").expect("missing var: redis_url"),
+            redis_url: redis_url,
             auth_token: env::var("AUTH_TOKEN").expect("missing var: auth_token"),
         }
     }

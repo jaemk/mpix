@@ -1,7 +1,5 @@
-use crate::configuration::CONFIG;
 use crate::error::Result;
 use crate::Context;
-use redis::PipelineCommands;
 use {
     futures_util::{
         compat::{Future01CompatExt, Stream01CompatExt},
@@ -25,21 +23,6 @@ static INDEX: &'static str = r##"
 "##;
 
 pub async fn index(_ctx: Context) -> Result<Response<Body>> {
-    let client = redis::Client::open("redis://localhost").unwrap();
-    let conn = client.get_async_connection().compat().await?;
-    let mut pipe = redis::pipe();
-    pipe.incr("boop", 1)
-        .ignore()
-        .expire("boop", 5)
-        .ignore()
-        .get("boop");
-    let (conn, (count,)): (_, (i32,)) = pipe.query_async(conn).compat().await?;
-    let (_, cagain): (_, i32) = redis::cmd("GET")
-        .arg("boop")
-        .query_async(conn)
-        .compat()
-        .await?;
-
     let resp = Response::builder()
         .header("content-type", "text/html")
         .body(Body::from(INDEX))?;
@@ -64,6 +47,18 @@ impl Token {
         }
     }
 }
+impl redis::FromRedisValue for Token {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Token> {
+        match *v {
+            redis::Value::Data(ref bytes) => Ok(serde_json::from_slice(bytes)
+                .map_err(|_| (redis::ErrorKind::TypeError, "Invalid token json bytes"))?),
+            _ => Err((
+                redis::ErrorKind::TypeError,
+                "Response type not token compatible.",
+            ))?,
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct CreateToken<'a> {
@@ -75,11 +70,12 @@ pub async fn create(ctx: Context) -> Result<Response<Body>> {
         .auth
         .ok_or_else(|| "in an authorized context without a token")?;
     let body = ctx.request.into_body().compat().try_concat().await?;
-    let token_args: CreateToken = serde_json::from_slice(&body)?;
+    let token_args: CreateToken =
+        serde_json::from_slice(&body).map_err(|e| format!("Invalid create token input: {}", e))?;
     let token = Token::new(token_args.description);
     let token_str = serde_json::to_string(&token)?;
     let conn = ctx.redis.get_async_connection().compat().await?;
-    let key = format!("mpix.user:{}", auth.user_token);
+    let key = format!("mpix.user_tokens:{}", auth.user_token);
     let _: (_, ()) = redis::cmd("HSET")
         .arg(key)
         .arg(token.token)
@@ -102,6 +98,18 @@ impl TokenData {
     fn new() -> Self {
         Self {
             created: chrono::Local::now(),
+        }
+    }
+}
+impl redis::FromRedisValue for TokenData {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<TokenData> {
+        match *v {
+            redis::Value::Data(ref bytes) => Ok(serde_json::from_slice(bytes)
+                .map_err(|_| (redis::ErrorKind::TypeError, "Invalid token json bytes"))?),
+            _ => Err((
+                redis::ErrorKind::TypeError,
+                "Response type not token compatible.",
+            ))?,
         }
     }
 }
@@ -139,6 +147,66 @@ pub async fn track(ctx: Context) -> Result<Response<Body>> {
         .header("content-type", "image/png")
         .body(Body::from(PIXEL.as_slice()))?;
     Ok(r)
+}
+
+pub async fn tracking_stats(ctx: Context) -> Result<Response<Body>> {
+    let auth = ctx
+        .auth
+        .ok_or_else(|| "in an authorized context without a token")?;
+    let conn = ctx.redis.get_async_connection().compat().await?;
+    match ctx.captures.get("token").ok() {
+        Some(token) => {
+            #[derive(Serialize)]
+            struct ReturnData {
+                events: Vec<TokenData>,
+            }
+
+            let key = format!("mpix.token:{}", token);
+            let (_, token_data): (_, Option<Vec<TokenData>>) = redis::cmd("LRANGE")
+                .arg(key)
+                .arg(0)
+                .arg(-1)
+                .query_async(conn)
+                .compat()
+                .await?;
+            let resp = ReturnData {
+                events: token_data.unwrap_or_else(|| vec![]),
+            };
+            Ok(Response::new(Body::from(serde_json::to_string(&resp)?)))
+        }
+        None => {
+            #[derive(Serialize)]
+            struct ReturnData {
+                tokens: Vec<Token>,
+            }
+
+            let key = format!("mpix.user_tokens:{}", auth.user_token);
+            let (_conn, tokens): (_, Option<Vec<Token>>) = redis::cmd("HVALS")
+                .arg(key)
+                .query_async(conn)
+                .compat()
+                .await?;
+            let resp = ReturnData {
+                tokens: tokens.unwrap_or_else(|| vec![]),
+            };
+            Ok(Response::new(Body::from(serde_json::to_string(&resp)?)))
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Status<'a, 'b> {
+    status: &'a str,
+    hash: &'b str,
+}
+
+pub async fn status(_ctx: Context) -> Result<Response<Body>> {
+    let st = Status {
+        status: "ok",
+        hash: include_str!("../commit_hash.txt").trim(),
+    };
+    let status = serde_json::to_string(&st)?;
+    Ok(Response::new(Body::from(status)))
 }
 
 pub async fn not_found(_ctx: Context) -> Result<Response<Body>> {

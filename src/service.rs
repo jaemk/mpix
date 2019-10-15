@@ -15,15 +15,29 @@ use {
 
 use crate::configuration::CONFIG;
 use crate::error::{Error, ErrorKind, Result};
-use crate::router;
 use crate::{handlers, Auth};
+use crate::{router, User};
 
 lazy_static::lazy_static! {
     pub static ref LOG: slog::Logger = { crate::LOG.new(slog::o!("mod" => "service")) };
 }
 
 async fn is_valid_auth(auth_token: String) -> Result<Auth> {
-    if auth_token == CONFIG.auth_token {
+    slog::debug!(LOG, "checking auth");
+    let conn = redis::Client::open(CONFIG.redis_url.as_ref())?
+        .get_async_connection()
+        .compat()
+        .await?;
+    let (_, opt): (_, Option<User>) = redis::cmd("HGET")
+        .arg("mpix.users")
+        .arg(&auth_token)
+        .query_async(conn)
+        .compat()
+        .await
+        .unwrap();
+    slog::debug!(LOG, "authorized user";
+                 "user" => format!("{:?}", opt));
+    if let Some(_) = opt {
         Ok(Auth {
             user_token: auth_token,
         })
@@ -37,7 +51,7 @@ async fn ensure_auth(
     req: Request<Body>,
 ) -> Result<(Request<Body>, Option<Auth>, Option<Response<Body>>)> {
     lazy_static::lazy_static! {
-        static ref ALLOWED: HashSet<&'static str> = maplit::hashset!{""};
+        static ref ALLOWED: HashSet<&'static str> = maplit::hashset!{"", "/status"};
     };
 
     let path = req.uri().path().trim_end_matches("/");
@@ -104,9 +118,12 @@ async fn route(
 ) -> Result<Response<Body>> {
     router!(
          req, auth, method, uri.trim_end_matches("/"),
+         [Method::GET, r"^/p/(?P<token>[a-zA-Z0-9-_]+)$", {"token"}] -> handlers::track,
+         [Method::GET, r"^/status$", {}] -> handlers::status,
          [Method::GET, r"^$", {}] -> handlers::index,
          [Method::POST, r"^/create$", {}] -> handlers::create,
-         [Method::GET, r"^/p/(?P<token>[a-zA-Z0-9-_]+)$", {"token"}] -> handlers::track,
+         [Method::GET, r"^/stat$", {}] -> handlers::tracking_stats,
+         [Method::GET, r"^/stat/(?P<token>[a-zA-Z0-9-_]+)$", {"token"}] -> handlers::tracking_stats,
          _ -> handlers::not_found,
     );
 }

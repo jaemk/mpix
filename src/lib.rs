@@ -8,6 +8,7 @@ use {
     error::{Error, ErrorKind, Result},
     hyper::{Body, Request},
     lazy_static::lazy_static,
+    serde::{Deserialize, Serialize},
     slog::Logger,
     std::collections::HashMap,
 };
@@ -61,6 +62,23 @@ impl Caps {
                 ErrorKind::MissingUriParam(format!("missing expected uri parameter '{}'", s))
             })?;
         Ok(val)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct User {
+    name: String,
+}
+impl redis::FromRedisValue for User {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<User> {
+        match *v {
+            redis::Value::Data(ref bytes) => Ok(serde_json::from_slice(bytes)
+                .map_err(|_| (redis::ErrorKind::TypeError, "Invalid user json bytes"))?),
+            _ => Err((
+                redis::ErrorKind::TypeError,
+                "Response type not user compatible.",
+            ))?,
+        }
     }
 }
 
